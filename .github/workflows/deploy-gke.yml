@@ -82,14 +82,13 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
-      - name: Install GKE auth plugin
-        run: |
-          gcloud components install gke-gcloud-auth-plugin -q
-          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
       - name: Get GKE credentials
-        run: |
-          gcloud container clusters get-credentials "${{ env.CLUSTER_NAME }}" --region "${{ env.GKE_LOCATION }}" --project "${{ env.GCP_PROJECT_ID }}"
-          kubectl version --client=true
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          project_id:  ${{ env.GCP_PROJECT_ID }}
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          location:    ${{ env.GKE_LOCATION }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
       - name: Install Helm
         run: |
           curl -L https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o helm.tgz
