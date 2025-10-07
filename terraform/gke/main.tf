@@ -1,12 +1,12 @@
 resource "google_project_service" "container" {
-  project = var.project_id
-  service = "container.googleapis.com"
+  project                    = var.project_id
+  service                    = "container.googleapis.com"
   disable_dependent_services = true
 }
 
 resource "google_project_service" "compute" {
-  project = var.project_id
-  service = "compute.googleapis.com"
+  project                    = var.project_id
+  service                    = "compute.googleapis.com"
   disable_dependent_services = true
 }
 
@@ -33,12 +33,12 @@ resource "google_compute_subnetwork" "subnet" {
 }
 
 resource "google_container_cluster" "cluster" {
-  name               = var.cluster_name
-  location           = var.region
-  network            = google_compute_network.vpc.self_link
-  subnetwork         = google_compute_subnetwork.subnet.self_link
+  name                     = var.cluster_name
+  location                 = var.region
+  network                  = google_compute_network.vpc.self_link
+  subnetwork               = google_compute_subnetwork.subnet.self_link
   remove_default_node_pool = true
-  initial_node_count = 1
+  initial_node_count       = 1
 
   ip_allocation_policy {
     cluster_secondary_range_name  = "pods"
@@ -74,17 +74,17 @@ resource "google_project_iam_member" "nodes_monitoring_viewer" {
 }
 
 resource "google_container_node_pool" "primary" {
-  name       = "primary-pool"
-  location   = var.region
-  cluster    = google_container_cluster.cluster.name
+  name     = "primary-pool"
+  location = var.region
+  cluster  = google_container_cluster.cluster.name
 
   node_config {
-    machine_type = var.node_machine_type
+    machine_type    = var.node_machine_type
     service_account = google_service_account.nodes.email
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]
-    labels = { cluster = var.cluster_name }
+    labels   = { cluster = var.cluster_name }
     metadata = { disable-legacy-endpoints = "true" }
   }
 
