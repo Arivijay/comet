@@ -1,11 +1,13 @@
 name: gke-infra-and-app
+
 on:
-  # push:
-  #  branches: [ "main" ]
-  workflow_dispatch: {}
+  # to avoid re-provisioning; will be turned back on when ready
+  workflow_dispatch:
+
 permissions:
   contents: read
   packages: write
+
 env:
   TF_GKE_DIR: terraform/gke
   HELM_RELEASE: hello-world
@@ -15,21 +17,25 @@ env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   GKE_LOCATION: ${{ vars.GKE_LOCATION || 'us-central1' }}
   GHCR_IMAGE: ${{ vars.GHCR_IMAGE || format('ghcr.io/{0}/k8s-hello-world-app', github.repository_owner) }}
+
 jobs:
   build_and_push_app:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build and push
         run: |
           docker build -t "${GHCR_IMAGE}:${GITHUB_SHA}" ./app
           docker push "${GHCR_IMAGE}:${GITHUB_SHA}"
+
       - name: Expose image info
         id: meta
         run: |
@@ -38,23 +44,28 @@ jobs:
     outputs:
       image: ${{ steps.meta.outputs.image }}
       tag: ${{ steps.meta.outputs.tag }}
+
   terraform_gke:
     needs: build_and_push_app
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
+
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.8.5
+
       - name: Terraform Init/Validate/Plan
         working-directory: ${{ env.TF_GKE_DIR }}
         env:
@@ -64,29 +75,39 @@ jobs:
           terraform fmt -recursive
           terraform validate
           terraform plan -out=tfplan -input=false -var="project_id=${{ env.GCP_PROJECT_ID }}" -var="region=${{ env.GKE_LOCATION }}"
+
       - name: Terraform Apply
         working-directory: ${{ env.TF_GKE_DIR }}
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
         run: terraform apply -auto-approve tfplan
+
   deploy_and_test:
     needs: [build_and_push_app, terraform_gke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
+
+      # >>> This is the critical part on GitHub runners <<<
+      # Install the GKE client-go auth plugin via APT (components install is disabled on runners)
       - name: Install GKE auth plugin (apt)
         run: |
           sudo apt-get update
           sudo apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
+          which gke-gcloud-auth-plugin || true
+
+      # This action writes kubeconfig and is compatible with the plugin
       - name: Get GKE credentials
         uses: google-github-actions/get-gke-credentials@v2
         with:
@@ -94,28 +115,43 @@ jobs:
           cluster_name: ${{ env.CLUSTER_NAME }}
           location:    ${{ env.GKE_LOCATION }}
           credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Sanity check cluster
+        run: |
+          kubectl version --client=true
+          kubectl cluster-info
+          kubectl get nodes
+
       - name: Install Helm
         run: |
           curl -L https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o helm.tgz
           tar -xzf helm.tgz
           sudo mv linux-amd64/helm /usr/local/bin/helm
           helm version
+
       - name: Add Bitnami repo & pull dependencies
         run: |
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm dependency update "${{ env.HELM_CHART_DIR }}"
+
       - name: Lint chart
         run: helm lint "${{ env.HELM_CHART_DIR }}"
+
       - name: Deploy (upgrade --install)
         run: |
-          helm upgrade --install "${{ env.HELM_RELEASE }}" "${{ env.HELM_CHART_DIR }}" --wait             --set image.repository="${{ needs.build_and_push_app.outputs.image }}"             --set image.tag="${{ needs.build_and_push_app.outputs.tag }}"
+          helm upgrade --install "${{ env.HELM_RELEASE }}" "${{ env.HELM_CHART_DIR }}" --wait \
+            --set image.repository="${{ needs.build_and_push_app.outputs.image }}" \
+            --set image.tag="${{ needs.build_and_push_app.outputs.tag }}"
           kubectl get svc -o wide
+
       - name: Run helm test
         run: helm test "${{ env.HELM_RELEASE }}" --logs
+
       - name: Package chart
         run: |
           mkdir -p "${{ env.CHART_PACKAGE_DIR }}"
           helm package "${{ env.HELM_CHART_DIR }}" --destination "${{ env.CHART_PACKAGE_DIR }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
