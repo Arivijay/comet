@@ -85,6 +85,8 @@ jobs:
   deploy_and_test:
     needs: [build_and_push_app, terraform_gke]
     runs-on: ubuntu-latest
+    container:
+      image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
     steps:
       - uses: actions/checkout@v4
 
