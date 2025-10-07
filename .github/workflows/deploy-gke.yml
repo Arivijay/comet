@@ -1,12 +1,17 @@
 name: gke-infra-and-app
 
 on:
-  # Manual only to avoid surprise re-provisioning; turn push back on when ready
+  # Manual only to avoid surprise re-provisioning; enable push later if you want
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
+
+# ✅ Ensure all run steps use bash (pipefail supported)
+defaults:
+  run:
+    shell: bash
 
 env:
   TF_GKE_DIR: terraform/gke
@@ -47,7 +52,7 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
 
   terraform_gke:
-    # keep this separate so you can also run it alone if needed
+    needs: build_and_push_app
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +91,7 @@ jobs:
         run: terraform apply -auto-approve tfplan
 
   deploy_and_test:
-    # No 'needs' so you can run this job by itself from Actions
+    needs: [build_and_push_app, terraform_gke]
     runs-on: ubuntu-latest
     container:
       image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
@@ -94,7 +99,6 @@ jobs:
       # Force kubectl/helm to use the kubeconfig we write below
       KUBECONFIG: ${{ github.workspace }}/kubeconfig
       HELM_KUBECONFIG: ${{ github.workspace }}/kubeconfig
-      # If you run deploy alone, these may be empty; we'll default them in-shell
       IMAGE_REPO: ${{ needs.build_and_push_app.outputs.image }}
       IMAGE_TAG:  ${{ needs.build_and_push_app.outputs.tag }}
     steps:
@@ -108,20 +112,19 @@ jobs:
       - name: Set project in gcloud
         run: gcloud config set project "${{ env.GCP_PROJECT_ID }}"
 
-      # Ensure kubectl exists inside the container (no sudo available)
       - name: Install kubectl (apt)
         run: |
+          set -euo pipefail
           apt-get update
           apt-get install -y kubectl
           which kubectl && kubectl version --client=true
 
-      # Nuke any default kubeconfigs that could contain exec stanzas
       - name: Remove any pre-existing kubeconfigs
         run: |
+          set -euo pipefail
           rm -f /github/home/.kube/config || true
           rm -f ~/.kube/config || true
 
-      # Build a clean kubeconfig that uses a short-lived bearer token (no exec plugin)
       - name: Build kubeconfig (no exec plugin)
         env:
           PROJECT_ID:   ${{ env.GCP_PROJECT_ID }}
@@ -132,14 +135,11 @@ jobs:
           ENDPOINT="$(gcloud container clusters describe "${CLUSTER_NAME}" \
             --region "${GKE_LOCATION}" --project "${PROJECT_ID}" \
             --format='value(endpoint)')"
-
           CA_B64="$(gcloud container clusters describe "${CLUSTER_NAME}" \
             --region "${GKE_LOCATION}" --project "${PROJECT_ID}" \
             --format='value(masterAuth.clusterCaCertificate)')"
-
           echo "$CA_B64" | base64 -d > ca.crt
           ACCESS_TOKEN="$(gcloud auth print-access-token)"
-
           cat > "$KUBECONFIG" <<EOF
           apiVersion: v1
           kind: Config
@@ -159,18 +159,17 @@ jobs:
             user:
               token: ${ACCESS_TOKEN}
           EOF
-
-          echo "Wrote kubeconfig to $KUBECONFIG"
-          echo "Checking for any 'exec:' stanzas (should be none):"
           ! grep -n 'exec:' "$KUBECONFIG" || (echo "ERROR: found exec in kubeconfig" && exit 1)
 
       - name: Sanity check cluster
         run: |
+          set -euo pipefail
           kubectl --kubeconfig "$KUBECONFIG" cluster-info
           kubectl --kubeconfig "$KUBECONFIG" get nodes
 
       - name: Install Helm
         run: |
+          set -euo pipefail
           curl -L https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o helm.tgz
           tar -xzf helm.tgz
           mv linux-amd64/helm /usr/local/bin/helm
@@ -178,33 +177,33 @@ jobs:
 
       - name: Add Bitnami repo & pull dependencies
         run: |
+          set -euo pipefail
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm dependency update "${{ env.HELM_CHART_DIR }}"
 
       - name: Lint chart
-        run: helm lint "${{ env.HELM_CHART_DIR }}"
+        run: |
+          set -euo pipefail
+          helm lint "${{ env.HELM_CHART_DIR }}"
 
       - name: Deploy (upgrade --install)
-        env:
-          GHCR_IMAGE: ${{ env.GHCR_IMAGE }}
         run: |
-          # If deploy runs alone, default to GHCR_IMAGE + GITHUB_SHA
-          repo="${IMAGE_REPO:-${GHCR_IMAGE}}"
-          tag="${IMAGE_TAG:-${GITHUB_SHA}}"
-
-          echo "Deploying image ${repo}:${tag}"
+          set -euo pipefail
+          echo "Deploying image ${IMAGE_REPO}:${IMAGE_TAG}"
           helm upgrade --install "${{ env.HELM_RELEASE }}" "${{ env.HELM_CHART_DIR }}" --wait \
             --kubeconfig "$KUBECONFIG" \
-            --set image.repository="${repo}" \
-            --set image.tag="${tag}"
-
+            --set image.repository="${IMAGE_REPO}" \
+            --set image.tag="${IMAGE_TAG}"
           kubectl --kubeconfig "$KUBECONFIG" get svc -o wide
 
       - name: Run helm test
-        run: helm --kubeconfig "$KUBECONFIG" test "${{ env.HELM_RELEASE }}" --logs
+        run: |
+          set -euo pipefail
+          helm --kubeconfig "$KUBECONFIG" test "${{ env.HELM_RELEASE }}" --logs
 
       - name: Package chart
         run: |
+          set -euo pipefail
           mkdir -p "${{ env.CHART_PACKAGE_DIR }}"
           helm package "${{ env.HELM_CHART_DIR }}" --destination "${{ env.CHART_PACKAGE_DIR }}"
 
