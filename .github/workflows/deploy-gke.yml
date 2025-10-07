@@ -100,23 +100,42 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      # >>> This is the critical part on GitHub runners <<<
-      # Install the GKE client-go auth plugin via APT (components install is disabled on runners)
-      - name: Install GKE auth plugin (apt)
+      - name: Build kubeconfig without auth plugin
+        env:
+          PROJECT_ID:     ${{ env.GCP_PROJECT_ID }}
+          CLUSTER_NAME:   ${{ env.CLUSTER_NAME }}
+          GKE_LOCATION:   ${{ env.GKE_LOCATION }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin
-          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
-          which gke-gcloud-auth-plugin || true
-
-      # This action writes kubeconfig and is compatible with the plugin
-      - name: Get GKE credentials
-        uses: google-github-actions/get-gke-credentials@v2
-        with:
-          project_id:  ${{ env.GCP_PROJECT_ID }}
-          cluster_name: ${{ env.CLUSTER_NAME }}
-          location:    ${{ env.GKE_LOCATION }}
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          set -euo pipefail
+  
+          # 1) Describe cluster and extract endpoint + CA
+          ENDPOINT="$(gcloud container clusters describe "${CLUSTER_NAME}" \
+            --region "${GKE_LOCATION}" --project "${PROJECT_ID}" \
+            --format='value(endpoint)')"
+  
+          CA_B64="$(gcloud container clusters describe "${CLUSTER_NAME}" \
+            --region "${GKE_LOCATION}" --project "${PROJECT_ID}" \
+            --format='value(masterAuth.clusterCaCertificate)')"
+  
+          echo "$CA_B64" | base64 -d > ca.crt
+  
+          # 2) Get an OAuth access token for this job
+          # (google-github-actions/auth already set up credentials for gcloud)
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+  
+          # 3) Build kubeconfig that uses the bearer token directly
+          kubectl config set-cluster gke-ci \
+            --server="https://${ENDPOINT}" \
+            --certificate-authority=ca.crt
+  
+          kubectl config set-credentials gke-ci-user \
+            --token="${ACCESS_TOKEN}"
+  
+          kubectl config set-context gke-ci \
+            --cluster=gke-ci \
+            --user=gke-ci-user
+  
+          kubectl config use-context gke-ci
 
       - name: Sanity check cluster
         run: |
