@@ -61,7 +61,7 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
         run: |
           terraform init -input=false
-          terraform fmt -check
+          terraform fmt -recursive
           terraform validate
           terraform plan -out=tfplan -input=false -var="project_id=${{ env.GCP_PROJECT_ID }}" -var="region=${{ env.GKE_LOCATION }}"
       - name: Terraform Apply
