@@ -1,0 +1,12 @@
+apiVersion: v2
+name: hello-world
+description: "Custom Hello World app; optionally bundles Bitnami Redis as a subchart."
+type: application
+version: 0.2.0
+appVersion: "1.0.0"
+
+dependencies:
+  - name: redis
+    version: "19.0.0"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled

@@ -1,0 +1,3 @@
+Thanks for installing {{ .Chart.Name }}!
+1) kubectl get svc {{ include "hello-world.fullname" . }} -o wide
+2) If Redis is enabled (redis.enabled=true), the app uses {{ include "hello-world.fullname" . }}-redis-master.

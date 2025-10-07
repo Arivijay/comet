@@ -1,0 +1,10 @@
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+tfplan
+*.tgz
+charts/*.tgz
+__pycache__/
+*.pyc
+.DS_Store
