@@ -1,7 +1,6 @@
 name: gke-infra-and-app
 
 on:
-  # Manual only to avoid surprise re-provisioning. Turn push back on when ready.
   workflow_dispatch:
 
 permissions:
@@ -15,7 +14,7 @@ env:
   CHART_PACKAGE_DIR: packaged
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'comet-hello-gke' }}
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-  # IMPORTANT: Must be a REGION (e.g., us-central1), not a zone
+  # Must be a REGION, e.g., us-central1
   GKE_LOCATION: ${{ vars.GKE_LOCATION || 'us-central1' }}
   GHCR_IMAGE: ${{ vars.GHCR_IMAGE || format('ghcr.io/{0}/k8s-hello-world-app', github.repository_owner) }}
 
@@ -24,19 +23,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build and push
         run: |
           docker build -t "${GHCR_IMAGE}:${GITHUB_SHA}" ./app
           docker push "${GHCR_IMAGE}:${GITHUB_SHA}"
-
       - name: Expose image info
         id: meta
         run: |
@@ -51,22 +47,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
-
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.8.5
-
       - name: Terraform Init/Validate/Plan
         working-directory: ${{ env.TF_GKE_DIR }}
         env:
@@ -78,7 +70,6 @@ jobs:
           terraform plan -out=tfplan -input=false \
             -var="project_id=${{ env.GCP_PROJECT_ID }}" \
             -var="region=${{ env.GKE_LOCATION }}"
-
       - name: Terraform Apply
         working-directory: ${{ env.TF_GKE_DIR }}
         env:
@@ -88,7 +79,6 @@ jobs:
   deploy_and_test:
     needs: [build_and_push_app, terraform_gke]
     runs-on: ubuntu-latest
-    # Run inside Cloud SDK container (has gcloud; we’ll apt-install kubectl)
     container:
       image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
     steps:
@@ -102,15 +92,14 @@ jobs:
       - name: Set project in gcloud
         run: gcloud config set project "${{ env.GCP_PROJECT_ID }}"
 
-      # Ensure kubectl is present in the container (no sudo in this image)
       - name: Install kubectl (apt)
         run: |
           apt-get update
           apt-get install -y kubectl
           which kubectl && kubectl version --client=true
 
-      # Build kubeconfig WITHOUT the GKE auth plugin (use bearer token)
-      - name: Build kubeconfig without auth plugin
+      # === Build a CLEAN kubeconfig and force everyone to use it ===
+      - name: Build kubeconfig (no exec plugin)
         env:
           PROJECT_ID:   ${{ env.GCP_PROJECT_ID }}
           CLUSTER_NAME: ${{ env.CLUSTER_NAME }}
@@ -118,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1) Get API endpoint + CA certificate
+          # 1) Cluster endpoint & CA (no kubeconfig is created here)
           ENDPOINT="$(gcloud container clusters describe "${CLUSTER_NAME}" \
             --region "${GKE_LOCATION}" --project "${PROJECT_ID}" \
             --format='value(endpoint)')"
@@ -129,27 +118,40 @@ jobs:
 
           echo "$CA_B64" | base64 -d > ca.crt
 
-          # 2) Get an OAuth access token tied to this job
+          # 2) Get OAuth token for this job
           ACCESS_TOKEN="$(gcloud auth print-access-token)"
 
-          # 3) Write kubeconfig
-          kubectl config set-cluster gke-ci \
-            --server="https://${ENDPOINT}" \
-            --certificate-authority=ca.crt
+          # 3) Write minimal kubeconfig to ./kubeconfig (no exec blocks)
+          cat > kubeconfig <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - cluster:
+              certificate-authority-data: ${CA_B64}
+              server: https://${ENDPOINT}
+            name: gke-ci
+          contexts:
+          - context:
+              cluster: gke-ci
+              user: gke-ci-user
+            name: gke-ci
+          current-context: gke-ci
+          users:
+          - name: gke-ci-user
+            user:
+              token: ${ACCESS_TOKEN}
+          EOF
 
-          kubectl config set-credentials gke-ci-user \
-            --token="${ACCESS_TOKEN}"
+          # 4) Make kubectl/helm use THIS file
+          echo "KUBECONFIG=$PWD/kubeconfig" >> $GITHUB_ENV
 
-          kubectl config set-context gke-ci \
-            --cluster=gke-ci \
-            --user=gke-ci-user
-
-          kubectl config use-context gke-ci
+          # Safety check: ensure no 'exec:' stanza exists
+          grep -n 'exec:' kubeconfig && exit 1 || true
 
       - name: Sanity check cluster
         run: |
-          kubectl cluster-info
-          kubectl get nodes
+          kubectl --kubeconfig "$KUBECONFIG" cluster-info
+          kubectl --kubeconfig "$KUBECONFIG" get nodes
 
       - name: Install Helm
         run: |
@@ -169,12 +171,13 @@ jobs:
       - name: Deploy (upgrade --install)
         run: |
           helm upgrade --install "${{ env.HELM_RELEASE }}" "${{ env.HELM_CHART_DIR }}" --wait \
+            --kubeconfig "$KUBECONFIG" \
             --set image.repository="${{ needs.build_and_push_app.outputs.image }}" \
             --set image.tag="${{ needs.build_and_push_app.outputs.tag }}"
-          kubectl get svc -o wide
+          kubectl --kubeconfig "$KUBECONFIG" get svc -o wide
 
       - name: Run helm test
-        run: helm test "${{ env.HELM_RELEASE }}" --logs
+        run: helm --kubeconfig "$KUBECONFIG" test "${{ env.HELM_RELEASE }}" --logs
 
       - name: Package chart
         run: |
