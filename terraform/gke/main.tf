@@ -50,29 +50,6 @@ resource "google_container_cluster" "cluster" {
   }
 }
 
-resource "google_service_account" "nodes" {
-  account_id   = "${var.cluster_name}-nodes"
-  display_name = "GKE nodes SA"
-}
-
-resource "google_project_iam_member" "nodes_logging" {
-  project = var.project_id
-  role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.nodes.email}"
-}
-
-resource "google_project_iam_member" "nodes_monitoring" {
-  project = var.project_id
-  role    = "roles/monitoring.metricWriter"
-  member  = "serviceAccount:${google_service_account.nodes.email}"
-}
-
-resource "google_project_iam_member" "nodes_monitoring_viewer" {
-  project = var.project_id
-  role    = "roles/monitoring.viewer"
-  member  = "serviceAccount:${google_service_account.nodes.email}"
-}
-
 resource "google_container_node_pool" "primary" {
   name     = "primary-pool"
   location = var.region
@@ -80,7 +57,6 @@ resource "google_container_node_pool" "primary" {
 
   node_config {
     machine_type    = var.node_machine_type
-    service_account = google_service_account.nodes.email
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]
