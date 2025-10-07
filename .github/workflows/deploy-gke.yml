@@ -1,7 +1,7 @@
 name: gke-infra-and-app
 
 on:
-  # to avoid re-provisioning; will be turned back on when ready
+  # Manual only to avoid surprise re-provisioning. Turn push back on when ready.
   workflow_dispatch:
 
 permissions:
@@ -15,6 +15,7 @@ env:
   CHART_PACKAGE_DIR: packaged
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'comet-hello-gke' }}
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  # IMPORTANT: Must be a REGION (e.g., us-central1), not a zone
   GKE_LOCATION: ${{ vars.GKE_LOCATION || 'us-central1' }}
   GHCR_IMAGE: ${{ vars.GHCR_IMAGE || format('ghcr.io/{0}/k8s-hello-world-app', github.repository_owner) }}
 
@@ -74,7 +75,9 @@ jobs:
           terraform init -input=false
           terraform fmt -recursive
           terraform validate
-          terraform plan -out=tfplan -input=false -var="project_id=${{ env.GCP_PROJECT_ID }}" -var="region=${{ env.GKE_LOCATION }}"
+          terraform plan -out=tfplan -input=false \
+            -var="project_id=${{ env.GCP_PROJECT_ID }}" \
+            -var="region=${{ env.GKE_LOCATION }}"
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_GKE_DIR }}
@@ -85,6 +88,7 @@ jobs:
   deploy_and_test:
     needs: [build_and_push_app, terraform_gke]
     runs-on: ubuntu-latest
+    # Run inside Cloud SDK container (has gcloud; we’ll apt-install kubectl)
     container:
       image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
     steps:
@@ -95,51 +99,55 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
+      - name: Set project in gcloud
+        run: gcloud config set project "${{ env.GCP_PROJECT_ID }}"
 
+      # Ensure kubectl is present in the container (no sudo in this image)
+      - name: Install kubectl (apt)
+        run: |
+          apt-get update
+          apt-get install -y kubectl
+          which kubectl && kubectl version --client=true
+
+      # Build kubeconfig WITHOUT the GKE auth plugin (use bearer token)
       - name: Build kubeconfig without auth plugin
         env:
-          PROJECT_ID:     ${{ env.GCP_PROJECT_ID }}
-          CLUSTER_NAME:   ${{ env.CLUSTER_NAME }}
-          GKE_LOCATION:   ${{ env.GKE_LOCATION }}
+          PROJECT_ID:   ${{ env.GCP_PROJECT_ID }}
+          CLUSTER_NAME: ${{ env.CLUSTER_NAME }}
+          GKE_LOCATION: ${{ env.GKE_LOCATION }}
         run: |
           set -euo pipefail
-  
-          # 1) Describe cluster and extract endpoint + CA
+
+          # 1) Get API endpoint + CA certificate
           ENDPOINT="$(gcloud container clusters describe "${CLUSTER_NAME}" \
             --region "${GKE_LOCATION}" --project "${PROJECT_ID}" \
             --format='value(endpoint)')"
-  
+
           CA_B64="$(gcloud container clusters describe "${CLUSTER_NAME}" \
             --region "${GKE_LOCATION}" --project "${PROJECT_ID}" \
             --format='value(masterAuth.clusterCaCertificate)')"
-  
+
           echo "$CA_B64" | base64 -d > ca.crt
-  
-          # 2) Get an OAuth access token for this job
-          # (google-github-actions/auth already set up credentials for gcloud)
+
+          # 2) Get an OAuth access token tied to this job
           ACCESS_TOKEN="$(gcloud auth print-access-token)"
-  
-          # 3) Build kubeconfig that uses the bearer token directly
+
+          # 3) Write kubeconfig
           kubectl config set-cluster gke-ci \
             --server="https://${ENDPOINT}" \
             --certificate-authority=ca.crt
-  
+
           kubectl config set-credentials gke-ci-user \
             --token="${ACCESS_TOKEN}"
-  
+
           kubectl config set-context gke-ci \
             --cluster=gke-ci \
             --user=gke-ci-user
-  
+
           kubectl config use-context gke-ci
 
       - name: Sanity check cluster
         run: |
-          kubectl version --client=true
           kubectl cluster-info
           kubectl get nodes
 
@@ -147,7 +155,7 @@ jobs:
         run: |
           curl -L https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o helm.tgz
           tar -xzf helm.tgz
-          sudo mv linux-amd64/helm /usr/local/bin/helm
+          mv linux-amd64/helm /usr/local/bin/helm
           helm version
 
       - name: Add Bitnami repo & pull dependencies
